@@ -1,0 +1,233 @@
+package git_release
+
+import (
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
+)
+
+func Provider() terraform.ResourceProvider {
+	p := &schema.Provider{
+		Schema: map[string]*schema.Schema{
+			"token": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("GITHUB_TOKEN", nil),
+				Description: descriptions["token"],
+			},
+			"owner": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("GITHUB_OWNER", nil),
+				Description: descriptions["owner"],
+			},
+			"organization": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("GITHUB_ORGANIZATION", nil),
+				Description: descriptions["organization"],
+				Deprecated:  "Use owner (or GITHUB_OWNER) instead of organization (or GITHUB_ORGANIZATION)",
+			},
+			"base_url": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("GITHUB_BASE_URL", "https://api.github.com/"),
+				Description: descriptions["base_url"],
+			},
+			"insecure": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Default:     false,
+				Description: descriptions["insecure"],
+			},
+			"write_delay_ms": {
+				Type:        schema.TypeInt,
+				Optional:    true,
+				Default:     1000,
+				Description: descriptions["write_delay_ms"],
+			},
+			"read_delay_ms": {
+				Type:        schema.TypeInt,
+				Optional:    true,
+				Default:     0,
+				Description: descriptions["read_delay_ms"],
+			},
+			"app_auth": {
+				Type:        schema.TypeList,
+				Optional:    true,
+				MaxItems:    1,
+				Description: descriptions["app_auth"],
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"id": {
+							Type:        schema.TypeString,
+							Required:    true,
+							DefaultFunc: schema.EnvDefaultFunc("GITHUB_APP_ID", nil),
+							Description: descriptions["app_auth.id"],
+						},
+						"installation_id": {
+							Type:        schema.TypeString,
+							Required:    true,
+							DefaultFunc: schema.EnvDefaultFunc("GITHUB_APP_INSTALLATION_ID", nil),
+							Description: descriptions["app_auth.installation_id"],
+						},
+						"pem_file": {
+							Type:        schema.TypeString,
+							Required:    true,
+							Sensitive:   true,
+							DefaultFunc: schema.EnvDefaultFunc("GITHUB_APP_PEM_FILE", nil),
+							Description: descriptions["app_auth.pem_file"],
+						},
+					},
+				},
+				ConflictsWith: []string{"token"},
+			},
+		},
+
+		ResourcesMap: map[string]*schema.Resource{
+			"github_branch":     resourceGithubBranch(),
+			"github_release":    resourceGithubRelease(),
+			"github_repository": resourceGithubRepository(),
+		},
+
+		DataSourcesMap: map[string]*schema.Resource{
+			"github_release": dataSourceGithubRelease(),
+		},
+	}
+
+	p.ConfigureFunc = providerConfigure(p)
+
+	return p
+}
+
+var descriptions map[string]string
+
+func init() {
+	descriptions = map[string]string{
+		"token": "The OAuth token used to connect to GitHub. Anonymous mode is enabled if both `token` and " +
+			"`app_auth` are not set.",
+
+		"base_url": "The GitHub Base API URL",
+
+		"insecure": "Enable `insecure` mode for testing purposes",
+
+		"owner": "The GitHub owner name to manage. " +
+			"Use this field instead of `organization` when managing individual accounts.",
+
+		"organization": "The GitHub organization name to manage. " +
+			"Use this field instead of `owner` when managing organization accounts.",
+
+		"app_auth": "The GitHub App credentials used to connect to GitHub. Conflicts with " +
+			"`token`. Anonymous mode is enabled if both `token` and `app_auth` are not set.",
+		"app_auth.id":              "The GitHub App ID.",
+		"app_auth.installation_id": "The GitHub App installation instance ID.",
+		"app_auth.pem_file":        "The GitHub App PEM file contents.",
+		"write_delay_ms": "Amount of time in milliseconds to sleep in between writes to GitHub API. " +
+			"Defaults to 1000ms or 1s if not set.",
+		"read_delay_ms": "Amount of time in milliseconds to sleep in between non-write requests to GitHub API. " +
+			"Defaults to 0ms if not set.",
+	}
+}
+
+func providerConfigure(p *schema.Provider) schema.ConfigureFunc {
+	return func(d *schema.ResourceData) (interface{}, error) {
+		owner := d.Get("owner").(string)
+		baseURL := d.Get("base_url").(string)
+		token := d.Get("token").(string)
+		insecure := d.Get("insecure").(bool)
+
+		// BEGIN backwards compatibility
+		// OwnerOrOrgEnvDefaultFunc used to be the default value for both
+		// 'owner' and 'organization'. This meant that if 'owner' and
+		// 'GITHUB_OWNER' were set, 'GITHUB_OWNER' would be used as the default
+		// value of 'organization' and therefore override 'owner'.
+		//
+		// This seems undesirable (an environment variable should not override
+		// an explicitly set value in a provider block), but is necessary
+		// for backwards compatibility. We could remove this backwards compatibility
+		// code in a future major release.
+		env, _ := OwnerOrOrgEnvDefaultFunc()
+		if env.(string) != "" {
+			owner = env.(string)
+		}
+		// END backwards compatibility
+
+		org := d.Get("organization").(string)
+		if org != "" {
+			log.Printf("[INFO] Selecting organization attribute as owner: %s", org)
+			owner = org
+		}
+
+		if appAuth, ok := d.Get("app_auth").([]interface{}); ok && len(appAuth) > 0 && appAuth[0] != nil {
+			appAuthAttr := appAuth[0].(map[string]interface{})
+
+			var appID, appInstallationID, appPemFile string
+
+			if v, ok := appAuthAttr["id"].(string); ok && v != "" {
+				appID = v
+			} else {
+				return nil, fmt.Errorf("app_auth.id must be set and contain a non-empty value")
+			}
+
+			if v, ok := appAuthAttr["installation_id"].(string); ok && v != "" {
+				appInstallationID = v
+			} else {
+				return nil, fmt.Errorf("app_auth.installation_id must be set and contain a non-empty value")
+			}
+
+			if v, ok := appAuthAttr["pem_file"].(string); ok && v != "" {
+				// The Go encoding/pem package only decodes PEM formatted blocks
+				// that contain new lines. Some platforms, like Terraform Cloud,
+				// do not support new lines within Environment Variables.
+				// Any occurrence of \n in the `pem_file` argument's value
+				// (explicit value, or default value taken from
+				// GITHUB_APP_PEM_FILE Environment Variable) is replaced with an
+				// actual new line character before decoding.
+				appPemFile = strings.Replace(v, `\n`, "\n", -1)
+			} else {
+				return nil, fmt.Errorf("app_auth.pem_file must be set and contain a non-empty value")
+			}
+
+			appToken, err := GenerateOAuthTokenFromApp(baseURL, appID, appInstallationID, appPemFile)
+			if err != nil {
+				return nil, err
+			}
+
+			token = appToken
+		}
+
+		writeDelay := d.Get("write_delay_ms").(int)
+		if writeDelay <= 0 {
+			return nil, fmt.Errorf("write_delay_ms must be greater than 0ms")
+		}
+		log.Printf("[INFO] Setting write_delay_ms to %d", writeDelay)
+
+		readDelay := d.Get("read_delay_ms").(int)
+		if readDelay < 0 {
+			return nil, fmt.Errorf("read_delay_ms must be greater than or equal to 0ms")
+		}
+		log.Printf("[DEBUG] Setting read_delay_ms to %d", readDelay)
+
+		config := Config{
+			Token:      token,
+			BaseURL:    baseURL,
+			Insecure:   insecure,
+			Owner:      owner,
+			WriteDelay: time.Duration(writeDelay) * time.Millisecond,
+			ReadDelay:  time.Duration(readDelay) * time.Millisecond,
+		}
+
+		meta, err := config.Meta()
+		if err != nil {
+			return nil, err
+		}
+
+		meta.(*Owner).StopContext = p.StopContext()
+
+		return meta, nil
+	}
+}
