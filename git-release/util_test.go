@@ -2,7 +2,6 @@ package git_release
 
 import (
 	"testing"
-	"unicode"
 )
 
 func TestAccValidateTeamIDFunc(t *testing.T) {
@@ -87,24 +86,6 @@ func TestAccGithubUtilTwoPartID(t *testing.T) {
 	if parsedPartTwo != "bar" {
 		t.Fatalf("Expected parsed part two bar, actual: %s", parsedPartTwo)
 	}
-}
-
-func flipUsernameCase(username string) string {
-	oc := []rune(username)
-
-	for i, ch := range oc {
-		if unicode.IsLetter(ch) {
-
-			if unicode.IsUpper(ch) {
-				oc[i] = unicode.ToLower(ch)
-			} else {
-				oc[i] = unicode.ToUpper(ch)
-			}
-			break
-		}
-
-	}
-	return string(oc)
 }
 
 func TestAccGithubUtilValidateSecretName(t *testing.T) {

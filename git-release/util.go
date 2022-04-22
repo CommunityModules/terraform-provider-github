@@ -1,36 +1,14 @@
 package git_release
 
 import (
-	"context"
-	"crypto/md5"
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 )
-
-const (
-	// https://developer.github.com/guides/traversing-with-pagination/#basics-of-pagination
-	maxPerPage = 100
-)
-
-func checkOrganization(meta interface{}) error {
-	if !meta.(*Owner).IsOrganization {
-		return fmt.Errorf("This resource can only be used in the context of an organization, %q is a user.", meta.(*Owner).name)
-	}
-
-	return nil
-}
-
-func caseInsensitive() schema.SchemaDiffSuppressFunc {
-	return func(k, old, new string, d *schema.ResourceData) bool {
-		return strings.EqualFold(old, new)
-	}
-}
 
 func validateValueFunc(values []string) schema.SchemaValidateFunc {
 	return func(v interface{}, k string) (we []string, errors []error) {
@@ -63,32 +41,6 @@ func parseTwoPartID(id, left, right string) (string, string, error) {
 // format the strings into an id `a:b`
 func buildTwoPartID(a, b string) string {
 	return fmt.Sprintf("%s:%s", a, b)
-}
-
-// return the pieces of id `left:center:right` as left, center, right
-func parseThreePartID(id, left, center, right string) (string, string, string, error) {
-	parts := strings.SplitN(id, ":", 3)
-	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("Unexpected ID format (%q). Expected %s:%s:%s", id, left, center, right)
-	}
-
-	return parts[0], parts[1], parts[2], nil
-}
-
-// format the strings into an id `a:b:c`
-func buildThreePartID(a, b, c string) string {
-	return fmt.Sprintf("%s:%s:%s", a, b, c)
-}
-
-func buildChecksumID(v []string) string {
-	sort.Strings(v)
-
-	h := md5.New()
-	// Hash.Write never returns an error. See https://pkg.go.dev/hash#Hash
-	_, _ = h.Write([]byte(strings.Join(v, "")))
-	bs := h.Sum(nil)
-
-	return fmt.Sprintf("%x", bs)
 }
 
 func expandStringList(configured []interface{}) []string {
@@ -135,42 +87,6 @@ func validateTeamIDFunc(v interface{}, keyName string) (we []string, errors []er
 	}
 
 	return
-}
-
-func splitRepoFilePath(path string) (string, string) {
-	parts := strings.Split(path, "/")
-	return parts[0], strings.Join(parts[1:], "/")
-}
-
-func getTeamID(teamIDString string, meta interface{}) (int64, error) {
-	// Given a string that is either a team id or team slug, return the
-	// id of the team it is referring to.
-	ctx := context.Background()
-	client := meta.(*Owner).v3client
-	orgName := meta.(*Owner).name
-	orgId := meta.(*Owner).id
-
-	teamId, parseIntErr := strconv.ParseInt(teamIDString, 10, 64)
-	if parseIntErr != nil {
-		// The given id not an integer, assume it is a team slug
-		team, _, slugErr := client.Teams.GetTeamBySlug(ctx, orgName, teamIDString)
-		if slugErr != nil {
-			return -1, errors.New(parseIntErr.Error() + slugErr.Error())
-		}
-		return team.GetID(), nil
-	} else {
-		// The given id is an integer, assume it is a team id
-		team, _, teamIdErr := client.Teams.GetTeamByID(ctx, orgId, teamId)
-		if teamIdErr != nil {
-			// There isn't a team with the given ID, assume it is a teamslug
-			team, _, slugErr := client.Teams.GetTeamBySlug(ctx, orgName, teamIDString)
-			if slugErr != nil {
-				return -1, errors.New(teamIdErr.Error() + slugErr.Error())
-			}
-			return team.GetID(), nil
-		}
-		return team.GetID(), nil
-	}
 }
 
 // https://docs.github.com/en/actions/reference/encrypted-secrets#naming-your-secrets
